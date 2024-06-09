@@ -2,4 +2,5 @@ Instruction to run the virtual machine from the '.img' file:
         make
         qemu-system-i386 -fda build/main_floppy.img
 
-        
+Fat12 boot.asm header defines from: 
+https://wiki.osdev.org/FAT
