@@ -1,0 +1,8 @@
+1. Simple Hello world starting point with a single bootloader
+2. Added support to read from the disk, debug using bochs, and setup changes to the structure of the project. Seperated into bootloader and kernel.
+    - Added: 
+        - debug.sh -> used to run the bochs gui to debug the BIOS
+        - run.sh -> used to run on qemu
+        - bochs_config -> setup bochs debugging environment
+3. Added support for the FAT file system (FAT12)
+    

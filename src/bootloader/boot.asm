@@ -39,35 +39,8 @@ ebr_system_id:                  db 'FAT12   '               ; 8 bytes
 
 
 start: 
-    jmp main
-
-; Prints a string to the screen
-; Params: ds:si points to string
-
-puts:
-    ; Save registers will be modified
-    push si
-    push ax
-
-.loop:
-    lodsb                           ; loads the next character in al
-    or al, al                       ; verify if next char is null
-    jz .done
-    
-    mov ah, 0x0e                    ; call bios interrupt
-    mov bh, 0
-    int 0x10
-    jmp .loop
 
 
-
-.done:
-    pop ax
-    pop si
-    ret
-
-; Main label to mark where code begins
-main:
     ; Setup data segments
     mov ax, 0
     mov ds, ax
@@ -77,20 +50,150 @@ main:
     mov ss, ax
     mov sp, 0x7c00                  ; Stack grows down from where we are loaded in memory
 
+    ; Make sure that the code segment is 0
+    push es
+    push word .after
+    retf
+    ; some bios might start at 0x7c0 
+.after:
+
+
     ; Read something from floppy disk
     ; BIOS should set DL to drive number
     mov [ebr_drive_number], dl
 
-    mov ax, 1                       ; LBA = 1,second sector from disk
-    mov cl, 1                       ; 1 sector to read  
-    mov bx, 0x7E00                  ; Data should be after the bootloader
-    call disk_read
-
     ; Print message
-    mov si, msg_hello
+    mov si, msg_loading
     call puts
 
-    cli                             ; Disable the interrupts
+    ; Read drive parameters:
+    push es
+    mov ah, 0x08
+    int 0x13
+    jc floppy_error
+    pop es
+
+    and cl, 0x3F                        ; Remove the top two bits
+    xor ch, ch
+    mov [bdb_sectors_per_track], cx     ; Sector count
+
+    inc dh
+    mov [bdb_heads], dh                 ; head count
+
+    ; read FAT root directory
+    mov ax, [bdb_sectors_per_fat]       ; LBA of root directory = reserved + fats * sectors_per_fat
+    mov bl, [bdb_fat_count]
+    xor bh, bh 
+    mul bx                              ; ax = (fats * sectors_per_fat)
+    add ax, [bdb_reserved_sectors]      ; ax = LBA of root directory
+    push ax
+
+    mov ax, [bdb_sectors_per_fat]
+    shl ax, 5
+    xor dx, dx
+    div word [bdb_bytes_per_sector]     ; number of sectors we need to read
+
+    test dx, dx                         ; if dx != 0 add 1
+    jz .root_dir_after
+    inc ax
+
+.root_dir_after:
+    ; read the root directory
+    mov cl, al                          ; number of sectors to read = size of root directory
+    pop ax
+    mov dl, [ebr_drive_number]          ; dl = drive number (previously saved)
+    mov bx, buffer
+    call disk_read
+
+    ; search for kernel.bin
+    xor bx, bx
+    mov di, buffer
+
+.search_kernel
+    mov si, file_kernel_bin
+    mov cx, 11
+    push di
+    repe cmpsb                          ; compare string bytes (si and di)
+    pop di
+    je .found_kernel
+
+    add di, 32
+    inc bx
+    cmp bx, [bdb_dir_entries_count]
+    jl .search_kernel
+
+    ; Kernel not found.
+    jmp kernel_not_found_error
+
+
+.found_kernel:
+    ; Save the first cluster value di
+    mov ax, [di+26]     ; first logical cluster field
+    mov [kernel_cluster], ax
+
+    ; load FAT from disk into memory
+    mov ax, [bdb_reserved_sectors]
+    mov bx, buffer
+    mov cl, [bdb_sectors_per_fat]
+    mov dl, [ebr_drive_number]
+    call disk_read
+
+    ; read kernel and process FAT chain
+    mov bx, KERNEL_LOAD_SEGMENT
+    mov es, bx
+    mov bx, KERNEL_LOAD_OFFSET
+
+.load_kernel_loop:
+    mov ax, [kernel_cluster]            ; First cluser = (kernel_cluster - 2) * sectors_per_cluster + start_sector
+    add ax, 31                          ; start sector = reserved + fats + root directory size = 1 + 18 + 134 = 33
+
+    mov cl, 1
+    mov dl, [ebr_drive_number]
+    call disk_read
+
+    add bx, [bdb_bytes_per_sector]      ; will overflow if kernel is larger than 64 kilobytes
+
+    ; Compute location of next cluser
+    mov ax, [kernel_cluster]
+    mov cx, 3
+    mul cx
+    mov cx, 2
+    div cx
+
+    mov si, buffer
+    add si, ax
+    mov ax, [ds:si]                     ; read entry from FAT table at index ax
+
+    or dx, dx
+    jz .even 
+
+.odd:
+    shr ax, 4
+    jmp .next_cluser_after
+
+.even:
+    and ax, 0x0FFF
+
+.next_cluser_after:
+    cmp ax, 0x0FF8                      ; end of chain
+    jae .read_finish
+    mov [kernel_cluster], ax
+    jmp .load_kernel_loop
+
+.read_finish:
+    ; boot device in dl
+    mov dl, [ebr_drive_number]
+
+    ; set segment register
+    mov ax, KERNEL_LOAD_SEGMENT
+    mov ds, ax
+    mov es, ax
+
+    jmp KERNEL_LOAD_SEGMENT:KERNEL_LOAD_OFFSET
+
+    jmp wait_key_and_reboot             ; should never happen
+
+    cli                                 ; Disable the interrupts
     hlt
 
 floppy_error:
@@ -98,14 +201,47 @@ floppy_error:
     call puts
     jmp wait_key_and_reboot
 
+kernel_not_found_error:
+    mov si, msg_kernel_not_found
+    call puts
+    jmp wait_key_and_reboot
+
 wait_key_and_reboot:
     mov ah, 0
     int 0x16                        ; Wait for keypress
     jmp 0xffff:0                    ; jmp to beginning of BIOS, should reboot
-    
+   
 .halt
     cli                             ; disable interrupts 
     hlt
+
+;
+; Prints a string to the screen
+; Params:
+;   - ds:si points to string
+;
+puts:
+    ; save registers we will modify
+    push si
+    push ax
+    push bx
+
+.loop:
+    lodsb               ; loads next character in al
+    or al, al           ; verify if next character is null?
+    jz .done
+
+    mov ah, 0x0E        ; call bios interrupt
+    mov bh, 0           ; set page number to 0
+    int 0x10
+
+    jmp .loop
+
+.done:
+    pop bx
+    pop ax
+    pop si    
+    ret
 
 ; 
 ; Disk Routines
@@ -210,11 +346,17 @@ disk_reset:
 
 
 
-msg_hello:                  db 'hello world!', ENDL, 0
+msg_loading:                db 'Loading...', ENDL, 0
 msg_read_failed:            db 'Read from disk has failed.', ENDL, 0
-
+msg_kernel_not_found        db 'KERNEL.bin not found. ', ENDL, 0
+file_kernel_bin:            db 'KERNEL  BIN'
+kernel_cluster:             dw 0'
+KERNEL_LOAD_SEGMENT         equ 0x2000
+KERNEL_LOAD_OFFSET          equ 0
 ; $-$$ gives the size of our program to this point measured in bytes
 times 510-($-$$) db 0
 
 ; dw is a two byte (1 word) constant
 dw 0xAA55
+
+buffer:

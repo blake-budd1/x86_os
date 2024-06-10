@@ -1,10 +1,21 @@
-org 0x7c00      ; BIOS looks here for the first boot block
+org 0x0      ; BIOS looks here for the first boot block
 bits 16         ; Tell assembler we are using 16-bit code (16 bits always starts in 16 bit)
 
 %define ENDL 0x0D, 0x0A
 
 start: 
     jmp main
+
+
+; Main label to mark where code begins
+main:
+    ; Print hello message
+    mov si, msg_hello
+    call puts
+
+.halt:
+    cli
+    hlt
 
 ; Prints a string to the screen
 ; Params: ds:si points to string
@@ -31,30 +42,4 @@ puts:
     pop si
     ret
 
-; Main label to mark where code begins
-main:
-    ; Setup data segments
-    mov ax, 0
-    mov ds, ax
-    mov es, ax
-
-    ; Setup stack
-    mov ss, ax
-    mov sp, 0x7c00 ; Stack grows down from where we are loaded in memory
-
-    ; Print message
-    mov si, msg_hello
-    call puts
-
-    hlt
-
-.halt:
-    jmp .halt
-
-msg_hello: db 'hello world!', ENDL, 0
-
-; $-$$ gives the size of our program to this point measured in bytes
-times 510-($-$$) db 0
-
-; dw is a two byte (1 word) constant
-dw 0xAA55
+msg_hello: db 'hello world from the kernel!', ENDL, 0
